@@ -1,0 +1,39 @@
+# Secrets — never commit
+.env
+.env.local
+.env.*.local
+
+# Local docs snapshot / scratch
+.llms.txt
+.tmp_*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.coverage
+coverage.xml
+htmlcov/
+
+# Node / TypeScript
+node_modules/
+*.tsbuildinfo
+coverage/
+
+# Go
+go/bin/
+*.test
+*.exe
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
