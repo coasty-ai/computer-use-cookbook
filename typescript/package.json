@@ -1,0 +1,33 @@
+{
+  "name": "@coasty-cookbook/typescript",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared typed Coasty Computer Use API client for the TypeScript cookbook track",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint . && prettier --check .",
+    "typecheck": "tsc --noEmit",
+    "fmt": "prettier --write . && eslint . --fix"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^25.9.3",
+    "@vitest/coverage-v8": "^4.1.8",
+    "eslint": "^10.4.1",
+    "globals": "^17.6.0",
+    "msw": "^2.14.6",
+    "prettier": "^3.8.4",
+    "tsx": "^4.22.4",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.61.0",
+    "vitest": "^4.1.8"
+  }
+}
