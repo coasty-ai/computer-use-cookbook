@@ -182,7 +182,10 @@ def forced_error(
             "current_scopes": ["predict", "session", "ground", "parse"],
         }
     elif code == "INSUFFICIENT_CREDITS":
-        extras = {"required": 5, "balance": wallet_balance_cents}
+        # A forced billing error fabricates a docs-style shortfall: the real
+        # wallet may well cover the op (required > balance must hold for the
+        # error to make sense to error-matrix demos).
+        extras = {"required": 20, "balance": min(wallet_balance_cents, 5)}
     elif code == "VALIDATION_ERROR":
         extras = {
             "details": [

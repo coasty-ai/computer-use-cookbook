@@ -268,7 +268,11 @@ def run_workflow(
         if event.event == "status":
             printer(f"[seq {event.id}] status -> {data.get('status')}")
         elif event.event == "billing":
-            printer(f"[seq {event.id}] billing: spent {data.get('cost_cents')} cents so far")
+            # The docs pin billing payloads for RUN events (credits_charged,
+            # cost_cents) but leave workflow-run billing payloads unpinned;
+            # some servers emit spent_cents instead. Accept any of them.
+            spent = data.get("cost_cents", data.get("spent_cents", data.get("credits_charged")))
+            printer(f"[seq {event.id}] billing: spent {spent} cents so far")
         elif event.event == "error":
             printer(f"[seq {event.id}] error event: {event.data}")
 
@@ -277,7 +281,12 @@ def run_workflow(
         )
         if hit_awaiting and not awaiting:
             awaiting = True
-            step_id = str(data.get("step_id") or data.get("awaiting_step_id") or "<unknown>")
+            step_id = str(data.get("step_id") or data.get("awaiting_step_id") or "")
+            if not step_id:
+                # A bare status event carries no step id. The WorkflowRun
+                # object's awaiting_step_id is the documented source of truth.
+                paused = client.get_workflow_run(run_id)
+                step_id = str(paused.data.get("awaiting_step_id") or "<unknown>")
             verb = "approving" if approve else "REJECTING"
             printer(f"[seq {event.id}] awaiting human at step {step_id!r} -- {verb}")
             resumed = client.resume_workflow_run(run_id, approved=approve, note=approval_note)

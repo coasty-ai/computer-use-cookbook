@@ -118,8 +118,14 @@ def test_404_run_not_found(respx_router: respx.MockRouter, make_error: Any) -> N
     assert result.attempts == 1
 
 
-def test_409_not_awaiting_human(respx_router: respx.MockRouter, make_error: Any) -> None:
-    respx_router.post(f"{BASE_URL}/runs/run_demo/resume").mock(
+def test_409_not_awaiting_human(
+    respx_router: respx.MockRouter, make_error: Any, make_run: Any
+) -> None:
+    # Organic flow: the scenario CREATES a run (never paused), then resumes it.
+    create_route = respx_router.post(f"{BASE_URL}/runs").mock(
+        return_value=httpx.Response(200, json=make_run(id="run_demo", status="running"))
+    )
+    resume_route = respx_router.post(f"{BASE_URL}/runs/run_demo/resume").mock(
         return_value=httpx.Response(
             409,
             json=make_error(
@@ -135,7 +141,10 @@ def test_409_not_awaiting_human(respx_router: respx.MockRouter, make_error: Any)
     assert result.exception == "ConflictError"
     assert result.code == "NOT_AWAITING_HUMAN"
     assert result.request_id == "req_409"
-    assert result.attempts == 1
+    assert result.attempts == 2  # one create + one refused resume, no retries
+    assert create_route.call_count == 1 and resume_route.call_count == 1
+    # the create was made idempotency-safe (a retried create must not double-run)
+    assert "Idempotency-Key" in create_route.calls.last.request.headers
     assert "'running'" in result.detail
     assert "awaiting_human" in result.detail
 
@@ -223,6 +232,83 @@ def test_500_on_unsafe_post_is_not_retried(respx_router: respx.MockRouter, make_
     assert result.attempts == 1
     assert result.slept == ()
     assert result.client_retried is False
+
+
+# ── mock-hook forcing + skip semantics ─────────────────────────────────────
+
+
+def test_force_error_header_is_sent_when_provided(
+    respx_router: respx.MockRouter, make_error: Any
+) -> None:
+    route = respx_router.post(f"{BASE_URL}/machines/mch_demo/terminal").mock(
+        return_value=httpx.Response(
+            403,
+            json=make_error(
+                code="INSUFFICIENT_SCOPE",
+                type="auth_error",
+                request_id="req_403f",
+                required_scope="terminal:exec",
+                current_scopes=["predict"],
+            ),
+        )
+    )
+    result = ex09.scenario_insufficient_scope(
+        BASE_URL, KEY, {ex09.FORCE_ERROR_HEADER: "INSUFFICIENT_SCOPE"}
+    )
+    assert result.code == "INSUFFICIENT_SCOPE"
+    sent = route.calls.last.request.headers[ex09.FORCE_ERROR_HEADER]
+    assert sent == "INSUFFICIENT_SCOPE"
+
+
+def test_run_all_without_hooks_runs_organic_and_skips_forceable(
+    respx_router: respx.MockRouter, make_error: Any, make_run: Any
+) -> None:
+    respx_router.get(f"{BASE_URL}/models").mock(
+        return_value=httpx.Response(
+            401, json=make_error(code="INVALID_API_KEY", type="auth_error", request_id="req_a")
+        )
+    )
+    respx_router.post(f"{BASE_URL}/predict").mock(
+        return_value=httpx.Response(
+            422,
+            json=make_error(code="VALIDATION_ERROR", type="validation_error", request_id="req_b"),
+        )
+    )
+    respx_router.get(f"{BASE_URL}/runs/run_does_not_exist").mock(
+        return_value=httpx.Response(
+            404, json=make_error(code="RUN_NOT_FOUND", type="not_found_error", request_id="req_c")
+        )
+    )
+    respx_router.post(f"{BASE_URL}/runs").mock(
+        return_value=httpx.Response(200, json=make_run(id="run_demo", status="queued"))
+    )
+    respx_router.post(f"{BASE_URL}/runs/run_demo/resume").mock(
+        return_value=httpx.Response(
+            409,
+            json=make_error(
+                code="NOT_AWAITING_HUMAN",
+                type="state_error",
+                request_id="req_d",
+                current_state="queued",
+                allowed_from=["awaiting_human"],
+            ),
+        )
+    )
+    rows = {row.name: row for row in ex09.run_all(BASE_URL, KEY, mock_hooks=False)}
+    assert rows["401 INVALID_API_KEY"].outcome == "raised"
+    assert rows["422 VALIDATION_ERROR"].outcome == "raised"
+    assert rows["404 RUN_NOT_FOUND"].outcome == "raised"
+    assert rows["409 NOT_AWAITING_HUMAN"].outcome == "raised"
+    # forceable / scripted scenarios are skipped, never silently "recovered"
+    for name in (
+        "403 INSUFFICIENT_SCOPE",
+        "402 INSUFFICIENT_CREDITS",
+        "429 RATE_LIMITED (recovers)",
+        "503/500 retry-then-surface",
+        "500 unsafe POST (no retry)",
+    ):
+        assert rows[name].outcome == "skipped"
+        assert rows[name].attempts == 0
 
 
 # ── presentation + live-mode safety ────────────────────────────────────────

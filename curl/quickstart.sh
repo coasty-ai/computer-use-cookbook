@@ -71,10 +71,13 @@ readonly TOTAL_MAX_CREDITS=$((
   + RUN_MAX_STEPS * COST_RUN_STEP_CREDITS
 ))
 
-# The deliberately-INVALID key used by the 401 demo in section 7. This is an
-# obviously fake value (48 zeros) that can never authenticate. Your real key
-# is not used, sent, or printed anywhere in that section.
-readonly FAKE_API_KEY="sk-coasty-test-000000000000000000000000000000000000000000000000"
+# The deliberately-INVALID key used by the 401 demo in section 7. The prefix
+# is MALFORMED on purpose (the only documented key families are
+# sk-coasty-live-/sk-coasty-test-/cua_sk_), so every conforming server --
+# production, the cookbook mock, and the offline stub alike -- rejects it
+# with 401 before any lookup. Your real key is not used, sent, or printed
+# anywhere in that section.
+readonly FAKE_API_KEY="sk-coasty-bogus-000000000000000000000000000000000000000000000000"
 
 # A real, tiny 320x240 PNG (light-gray background with a blue "OK button"
 # rectangle), embedded as a heredoc constant so the script is self-contained.

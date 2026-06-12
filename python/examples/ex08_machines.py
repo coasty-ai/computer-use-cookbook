@@ -255,7 +255,14 @@ def run_lifecycle(
             {"path": REMOTE_FILE_PATH, "content": REMOTE_FILE_CONTENT},
         )
         read_back = client.machine_files(machine_id, "read", {"path": REMOTE_FILE_PATH})
-        file_roundtrip_ok = read_back.data.get("content") == REMOTE_FILE_CONTENT
+        # The docs do not pin the files-op response shape: some servers return
+        # the content at the top level, others nest it under "result" like the
+        # documented /actions envelope. Accept both.
+        nested = read_back.data.get("result")
+        read_content = nested.get("content") if isinstance(nested, dict) else None
+        if read_content is None:
+            read_content = read_back.data.get("content")
+        file_roundtrip_ok = read_content == REMOTE_FILE_CONTENT
         printer(f"file write+read roundtrip ok={file_roundtrip_ok}")
 
         nav = client.machine_browser(machine_id, "navigate", parameters={"url": browser_url})

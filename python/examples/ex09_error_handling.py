@@ -19,11 +19,19 @@ Purpose
 Flow
     Each scenario is a small function taking ``(base_url, api_key)``; it
     builds its own client with a recording (non-sleeping) ``sleep`` and a
-    request-counting hook, performs ONE doomed call, and returns a
-    :class:`ScenarioResult` row. ``run_all`` renders the matrix as a table.
+    request-counting hook, performs a doomed (or recovering) call, and
+    returns a :class:`ScenarioResult` row. ``run_all`` renders the matrix.
     Tests point ``base_url`` at respx mocks; against the real production API
     this example only PRINTS the matrix (which scenarios are live-safe) and
     never fires requests.
+
+    Some failures (403 scope, 402 wallet, forced 5xx) cannot be triggered
+    organically on a healthy server. Against the cookbook's local mock
+    server (``make mock``) those scenarios send the documented
+    ``X-Mock-Force-Error: <CODE>`` test hook; ``main`` probes for that
+    support with one free request and skips the forceable scenarios when
+    the server does not honor it. The 429-then-recover demo needs a
+    scripted 429->200 sequence, so it always defers to the test suite.
 
 Endpoints
     GET /v1/models, POST /v1/predict, POST /v1/runs, GET /v1/runs/{id},
@@ -41,6 +49,7 @@ from __future__ import annotations
 import argparse
 import random
 import sys
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -56,8 +65,11 @@ from coasty import (
 
 # Obviously-fake keys: scenarios never touch the real API.
 DEMO_API_KEY = "sk-coasty-test-" + "0" * 48
-BAD_API_KEY = "sk-coasty-live-" + "f" * 48  # fake; the mock rejects it as 401
+# Malformed prefix: rejected as 401 by ANY conforming server (the documented
+# key families are sk-coasty-live-/sk-coasty-test-/cua_sk_ only).
+BAD_API_KEY = "sk-coasty-bogus-" + "f" * 48
 FAKE_SCREENSHOT_B64 = "iVBORw0KGgoAAAANSUhEUg" + "A" * 120  # >100 chars, no data: prefix
+FORCE_ERROR_HEADER = "X-Mock-Force-Error"  # cookbook mock-server test hook
 
 
 @dataclass(frozen=True)
@@ -76,10 +88,13 @@ class ScenarioResult:
 
     @property
     def client_retried(self) -> bool:
-        return self.attempts > 1
+        # The client always backs off (sleeps) between retry attempts, so
+        # recorded sleeps -- not request count -- distinguish a retry from a
+        # scenario that legitimately makes several different requests.
+        return len(self.slept) > 0
 
 
-ScenarioFn = Callable[[str, str], ScenarioResult]
+ScenarioFn = Callable[[str, str, "dict[str, str] | None"], ScenarioResult]
 
 
 @dataclass(frozen=True)
@@ -90,10 +105,16 @@ class Scenario:
     description: str
     safe_live: bool  # free + read-only: OK to fire at the real API
     run: ScenarioFn
+    # Error code to force via the mock server's X-Mock-Force-Error hook when
+    # the failure cannot be triggered organically (None = organic scenario).
+    force_error: str | None = None
+    # True when only a scripted response sequence (e.g. 429 then 200) can
+    # demonstrate the behavior -- always deferred to the test suite.
+    needs_script: bool = False
 
 
 def _instrumented_client(
-    base_url: str, api_key: str
+    base_url: str, api_key: str, extra_headers: dict[str, str] | None = None
 ) -> tuple[CoastyClient, httpx.Client, list[float], list[str]]:
     """A client whose sleeps are recorded (never real) and requests counted."""
     sleeps: list[float] = []
@@ -102,7 +123,7 @@ def _instrumented_client(
     def _count(request: httpx.Request) -> None:
         requests_seen.append(f"{request.method} {request.url.path}")
 
-    http_client = httpx.Client(event_hooks={"request": [_count]})
+    http_client = httpx.Client(event_hooks={"request": [_count]}, headers=extra_headers or {})
     client = CoastyClient(
         api_key=api_key,
         base_url=base_url,
@@ -120,9 +141,12 @@ def _run_one(
     call: Callable[[CoastyClient], str],
     *,
     detail_for: Callable[[CoastyError], str] | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> ScenarioResult:
     """Run one doomed (or recovering) call and capture the evidence."""
-    client, http_client, sleeps, requests_seen = _instrumented_client(base_url, api_key)
+    client, http_client, sleeps, requests_seen = _instrumented_client(
+        base_url, api_key, extra_headers
+    )
     try:
         recovered_detail = call(client)
     except CoastyError as exc:
@@ -156,7 +180,9 @@ def _run_one(
 # ── scenario functions ─────────────────────────────────────────────────────
 
 
-def scenario_invalid_api_key(base_url: str, api_key: str) -> ScenarioResult:
+def scenario_invalid_api_key(
+    base_url: str, api_key: str, extra_headers: dict[str, str] | None = None
+) -> ScenarioResult:
     """401: a bad key on a free endpoint. AuthenticationError, no retry."""
     del api_key  # this scenario deliberately uses a (fake) bad key
 
@@ -164,10 +190,12 @@ def scenario_invalid_api_key(base_url: str, api_key: str) -> ScenarioResult:
         client.models()
         return "unexpected success"
 
-    return _run_one("401 INVALID_API_KEY", base_url, BAD_API_KEY, call)
+    return _run_one("401 INVALID_API_KEY", base_url, BAD_API_KEY, call, extra_headers=extra_headers)
 
 
-def scenario_insufficient_scope(base_url: str, api_key: str) -> ScenarioResult:
+def scenario_insufficient_scope(
+    base_url: str, api_key: str, extra_headers: dict[str, str] | None = None
+) -> ScenarioResult:
     """403: key lacks terminal:exec. Shows required_scope vs current_scopes."""
 
     def call(client: CoastyClient) -> str:
@@ -182,10 +210,19 @@ def scenario_insufficient_scope(base_url: str, api_key: str) -> ScenarioResult:
             )
         return exc.message
 
-    return _run_one("403 INSUFFICIENT_SCOPE", base_url, api_key, call, detail_for=detail)
+    return _run_one(
+        "403 INSUFFICIENT_SCOPE",
+        base_url,
+        api_key,
+        call,
+        detail_for=detail,
+        extra_headers=extra_headers,
+    )
 
 
-def scenario_insufficient_credits(base_url: str, api_key: str) -> ScenarioResult:
+def scenario_insufficient_credits(
+    base_url: str, api_key: str, extra_headers: dict[str, str] | None = None
+) -> ScenarioResult:
     """402: wallet cannot cover the op. Prints required vs balance + top-up."""
 
     def call(client: CoastyClient) -> str:
@@ -203,34 +240,57 @@ def scenario_insufficient_credits(base_url: str, api_key: str) -> ScenarioResult
             )
         return exc.message
 
-    return _run_one("402 INSUFFICIENT_CREDITS", base_url, api_key, call, detail_for=detail)
+    return _run_one(
+        "402 INSUFFICIENT_CREDITS",
+        base_url,
+        api_key,
+        call,
+        detail_for=detail,
+        extra_headers=extra_headers,
+    )
 
 
-def scenario_validation_error(base_url: str, api_key: str) -> ScenarioResult:
+def scenario_validation_error(
+    base_url: str, api_key: str, extra_headers: dict[str, str] | None = None
+) -> ScenarioResult:
     """422: an invalid body (empty instruction / short screenshot). No retry."""
 
     def call(client: CoastyClient) -> str:
         client.predict("too-short", "")
         return "unexpected success"
 
-    return _run_one("422 VALIDATION_ERROR", base_url, api_key, call)
+    return _run_one("422 VALIDATION_ERROR", base_url, api_key, call, extra_headers=extra_headers)
 
 
-def scenario_not_found(base_url: str, api_key: str) -> ScenarioResult:
+def scenario_not_found(
+    base_url: str, api_key: str, extra_headers: dict[str, str] | None = None
+) -> ScenarioResult:
     """404: ids are mode-isolated; a missing run raises NotFoundError."""
 
     def call(client: CoastyClient) -> str:
         client.get_run("run_does_not_exist")
         return "unexpected success"
 
-    return _run_one("404 RUN_NOT_FOUND", base_url, api_key, call)
+    return _run_one("404 RUN_NOT_FOUND", base_url, api_key, call, extra_headers=extra_headers)
 
 
-def scenario_not_awaiting_human(base_url: str, api_key: str) -> ScenarioResult:
-    """409: resume is only valid from awaiting_human. Shows current_state."""
+def scenario_not_awaiting_human(
+    base_url: str, api_key: str, extra_headers: dict[str, str] | None = None
+) -> ScenarioResult:
+    """409: resume is only valid from awaiting_human. Shows current_state.
+
+    Organic flow: create a run (which starts ``queued``/``running``) and
+    immediately try to resume it -- the server must refuse with
+    NOT_AWAITING_HUMAN because nothing is paused. Two requests, no retries.
+    """
 
     def call(client: CoastyClient) -> str:
-        client.resume_run("run_demo")
+        created = client.create_run(
+            "mch_demo",
+            "reconcile the invoices (this run is never resumed from a pause)",
+            idempotency_key=f"ex09-409-{uuid.uuid4().hex[:8]}",
+        )
+        client.resume_run(str(created.data["id"]))
         return "unexpected success"
 
     def detail(exc: CoastyError) -> str:
@@ -238,10 +298,19 @@ def scenario_not_awaiting_human(base_url: str, api_key: str) -> ScenarioResult:
         allowed = exc.extras.get("allowed_from")
         return f"run is {current!r}; resume allowed only from {allowed!r}"
 
-    return _run_one("409 NOT_AWAITING_HUMAN", base_url, api_key, call, detail_for=detail)
+    return _run_one(
+        "409 NOT_AWAITING_HUMAN",
+        base_url,
+        api_key,
+        call,
+        detail_for=detail,
+        extra_headers=extra_headers,
+    )
 
 
-def scenario_rate_limited_recovers(base_url: str, api_key: str) -> ScenarioResult:
+def scenario_rate_limited_recovers(
+    base_url: str, api_key: str, extra_headers: dict[str, str] | None = None
+) -> ScenarioResult:
     """429 then 200: the client sleeps exactly Retry-After, then succeeds.
 
     /predict is safe to retry (charged-then-refunded on failure), so the
@@ -255,11 +324,15 @@ def scenario_rate_limited_recovers(base_url: str, api_key: str) -> ScenarioResul
             f"credits_charged={result.credits_charged})"
         )
 
-    return _run_one("429 RATE_LIMITED (recovers)", base_url, api_key, call)
+    return _run_one(
+        "429 RATE_LIMITED (recovers)", base_url, api_key, call, extra_headers=extra_headers
+    )
 
 
-def scenario_server_errors_surface(base_url: str, api_key: str) -> ScenarioResult:
-    """503 then 500s: retried with backoff (Retry-After honored), then raised.
+def scenario_server_errors_surface(
+    base_url: str, api_key: str, extra_headers: dict[str, str] | None = None
+) -> ScenarioResult:
+    """Persistent 5xx: retried with backoff (Retry-After honored), then raised.
 
     Failed predictions are charged-then-auto-refunded, so the surfaced
     ServerError costs nothing.
@@ -269,10 +342,14 @@ def scenario_server_errors_surface(base_url: str, api_key: str) -> ScenarioResul
         client.predict(FAKE_SCREENSHOT_B64, "open the settings page")
         return "unexpected success"
 
-    return _run_one("503/500 retry-then-surface", base_url, api_key, call)
+    return _run_one(
+        "503/500 retry-then-surface", base_url, api_key, call, extra_headers=extra_headers
+    )
 
 
-def scenario_unsafe_post_not_retried(base_url: str, api_key: str) -> ScenarioResult:
+def scenario_unsafe_post_not_retried(
+    base_url: str, api_key: str, extra_headers: dict[str, str] | None = None
+) -> ScenarioResult:
     """500 on POST /runs WITHOUT an Idempotency-Key: surfaced on attempt 1.
 
     The client only retries POSTs that are inherently safe (predict/ground/
@@ -284,7 +361,9 @@ def scenario_unsafe_post_not_retried(base_url: str, api_key: str) -> ScenarioRes
         client.create_run("mch_demo", "reconcile the invoices")  # no idempotency_key
         return "unexpected success"
 
-    return _run_one("500 unsafe POST (no retry)", base_url, api_key, call)
+    return _run_one(
+        "500 unsafe POST (no retry)", base_url, api_key, call, extra_headers=extra_headers
+    )
 
 
 SCENARIOS: tuple[Scenario, ...] = (
@@ -299,12 +378,14 @@ SCENARIOS: tuple[Scenario, ...] = (
         "terminal:exec missing -> InsufficientScopeError with required_scope.",
         safe_live=False,
         run=scenario_insufficient_scope,
+        force_error="INSUFFICIENT_SCOPE",
     ),
     Scenario(
         "402 INSUFFICIENT_CREDITS",
         "Wallet too small for /predict -> required vs balance + top-up hint.",
         safe_live=False,
         run=scenario_insufficient_credits,
+        force_error="INSUFFICIENT_CREDITS",
     ),
     Scenario(
         "422 VALIDATION_ERROR",
@@ -329,25 +410,67 @@ SCENARIOS: tuple[Scenario, ...] = (
         "429 with Retry-After then 200 -> the client sleeps exactly that long.",
         safe_live=False,
         run=scenario_rate_limited_recovers,
+        needs_script=True,
     ),
     Scenario(
         "503/500 retry-then-surface",
         "Persistent 5xx -> backoff retries (max 4 attempts) then ServerError.",
         safe_live=False,
         run=scenario_server_errors_surface,
+        force_error="UPSTREAM_UNAVAILABLE",
     ),
     Scenario(
         "500 unsafe POST (no retry)",
         "POST /runs without Idempotency-Key -> surfaced on the first attempt.",
         safe_live=False,
         run=scenario_unsafe_post_not_retried,
+        force_error="INTERNAL_ERROR",
     ),
 )
 
 
-def run_all(base_url: str, api_key: str = DEMO_API_KEY) -> list[ScenarioResult]:
-    """Run every scenario against ``base_url`` (a mock or local mock server)."""
-    return [scenario.run(base_url, api_key) for scenario in SCENARIOS]
+def _skipped(scenario: Scenario, why: str) -> ScenarioResult:
+    return ScenarioResult(
+        name=scenario.name,
+        outcome="skipped",
+        exception=None,
+        code=None,
+        request_id=None,
+        status_code=None,
+        attempts=0,
+        slept=(),
+        detail=why,
+    )
+
+
+def run_all(
+    base_url: str, api_key: str = DEMO_API_KEY, *, mock_hooks: bool = False
+) -> list[ScenarioResult]:
+    """Run every scenario against ``base_url`` (a mock or local mock server).
+
+    ``mock_hooks=True`` means the server honors the cookbook mock's
+    ``X-Mock-Force-Error`` header, which lets us trigger the failures that a
+    healthy server never produces organically (403/402/forced 5xx).
+    """
+    rows: list[ScenarioResult] = []
+    for scenario in SCENARIOS:
+        if scenario.needs_script:
+            rows.append(
+                _skipped(scenario, "needs a scripted 429->200 sequence; see the respx tests")
+            )
+        elif scenario.force_error is not None and not mock_hooks:
+            rows.append(
+                _skipped(
+                    scenario,
+                    f"cannot trigger organically; needs {FORCE_ERROR_HEADER} support "
+                    "(run the cookbook mock server) or the respx tests",
+                )
+            )
+        elif scenario.force_error is not None:
+            rows.append(scenario.run(base_url, api_key, {FORCE_ERROR_HEADER: scenario.force_error}))
+        else:
+            rows.append(scenario.run(base_url, api_key, None))
+    return rows
 
 
 def format_results(results: Sequence[ScenarioResult]) -> str:
@@ -379,6 +502,27 @@ def format_catalog() -> str:
 # ── CLI ────────────────────────────────────────────────────────────────────
 
 
+def _supports_mock_hooks(base_url: str, api_key: str) -> bool:
+    """One free probe: does this server honor the X-Mock-Force-Error hook?
+
+    GET /models is free; a server that honors the hook must answer with the
+    forced NOT_FOUND envelope instead of the model list.
+    """
+    try:
+        response = httpx.get(
+            f"{base_url}/models",
+            headers={"X-API-Key": api_key, FORCE_ERROR_HEADER: "NOT_FOUND"},
+            timeout=10.0,
+        )
+        body = response.json()
+    except (httpx.HTTPError, ValueError):
+        return False
+    error = body.get("error") if isinstance(body, dict) else None
+    return (
+        response.status_code == 404 and isinstance(error, dict) and error.get("code") == "NOT_FOUND"
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", maxsplit=1)[0])
     parser.add_argument(
@@ -395,8 +539,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     api_key = env.get_api_key() or DEMO_API_KEY
+    mock_hooks = _supports_mock_hooks(base_url, api_key)
+    print(
+        f"{FORCE_ERROR_HEADER} hook: "
+        + ("supported -- executing forceable scenarios too" if mock_hooks else "not supported")
+    )
     try:
-        results = run_all(base_url, api_key)
+        results = run_all(base_url, api_key, mock_hooks=mock_hooks)
     except CoastyError as exc:  # a scenario failed in an UNexpected way
         print(
             f"unexpected API error {exc.code} (request_id={exc.request_id}): {exc.message}",
