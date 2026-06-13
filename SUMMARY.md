@@ -22,6 +22,16 @@ seven sections). That e2e pass caught four real cross-track issues that unit
 mocks could not, all fixed and committed
 (`Harden examples against real servers…`).
 
+The cookbook was **also validated against the real `https://coasty.ai/v1`
+API** with a live key — see [`docs/LIVE_VALIDATION.md`](docs/LIVE_VALIDATION.md).
+Models, usage, pricing, parse, predict, ground, and the full session lifecycle
+all work live; the mouse-driving examples were exercised live through their
+pure cores with a `NullBackend` (no real input) and a synthetic screenshot.
+Machine provisioning on the test account returned a server-side `UPSTREAM_ERROR`
+(so runs/workflows, which need a VM, were validated against the mock), and the
+live API revealed a handful of harmless quirks the clients already handle —
+all catalogued in that doc and folded into the deviations list below.
+
 Shared HMAC webhook test vectors are pinned in `docs/API_NOTES.md` and
 asserted byte-identical in **all three languages** plus the mock
 (valid ×2, tampered body, stale/future timestamp with pinned now, ±300 s
@@ -95,8 +105,9 @@ duplicated.
 
 ## Commit log (logical units)
 
-1. scaffolding: plan, distilled API contract, secret-safe env handling
-2. python track · 3. typescript track · 4. go track · 5. mock + curl
-6. e2e hardening fixes (found by driving examples against the live mock)
-7. root docs + Makefile + CI
-8. this SUMMARY
+- scaffolding: plan, distilled API contract, secret-safe env handling
+- python track · typescript track · go track · mock + curl (one commit each)
+- e2e hardening fixes (found by driving examples against the live mock)
+- root docs + Makefile + CI
+- this SUMMARY
+- live-API validation notes + multi-language READMEs

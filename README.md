@@ -1,5 +1,7 @@
 # Coasty Computer Use API Cookbook
 
+> **English** · [简体中文](README.zh-CN.md) · [Español](README.es.md) · [日本語](README.ja.md) · [हिन्दी](README.hi.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Português (BR)](README.pt-BR.md) · [한국어](README.ko.md)
+
 Production-quality, multi-language examples for the
 [Coasty Computer Use API](https://coasty.ai/docs) — see a screen, act on it
 (click/type/scroll), run autonomous agent tasks, and orchestrate multi-step
